@@ -113,7 +113,6 @@ val appModule = module {
             sourceDao = get(),
             sourceRepository = get(),
             settings = get(),
-            connectivity = get(),
             epgDao = get(),
             importFinalizer = get(),
             channelDao = get(),
@@ -140,6 +139,7 @@ val appModule = module {
             player = get(),
             livePreview = get(),
             enginePool = get(),
+            importer = get(),
         )
     }
     viewModelOf(::LocalSyncViewModel)
