@@ -58,6 +58,12 @@ fun CategoryBrowserOverlay(
     currentCategoryId: Long?,
     onSelect: (categoryId: Long) -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * When set, a "History" row is pinned above the categories and choosing it calls this instead of
+     * [onSelect]. Multiview's picker offers it so a tile can be filled from the channels the user was
+     * just watching, without hunting for their categories across every playlist.
+     */
+    onSelectHistory: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = OwnTVTheme.colors
@@ -69,7 +75,8 @@ fun CategoryBrowserOverlay(
     val focusCurrent = remember { FocusRequester() }
 
     LaunchedEffect(Unit) {
-        runCatching { listState.scrollToItem(currentIndex) }
+        // The pinned History row sits at index 0 when present, so the categories start one later.
+        runCatching { listState.scrollToItem(currentIndex + if (onSelectHistory != null) 1 else 0) }
         runCatching { focusCurrent.requestFocus() }
     }
 
@@ -106,6 +113,18 @@ fun CategoryBrowserOverlay(
                 ),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
+                if (onSelectHistory != null) {
+                    // Pinned first, never "current": it is a shortcut into recently watched, not a
+                    // category a tile can be said to belong to.
+                    item(key = "history") {
+                        CategoryRow(
+                            name = stringResource(R.string.content_history),
+                            isCurrent = false,
+                            onClick = onSelectHistory,
+                            icon = OwnTVIcon.HISTORY,
+                        )
+                    }
+                }
                 items(categories, key = { it.first.id }) { (cat, displayName) ->
                     val isCurrent = cat.id == currentCategoryId
                     CategoryRow(
@@ -130,6 +149,7 @@ private fun CategoryRow(
     isCurrent: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    icon: OwnTVIcon = OwnTVIcon.LIVE_TV,
 ) {
     val colors = OwnTVTheme.colors
     FocusableSurface(
@@ -151,7 +171,7 @@ private fun CategoryRow(
                 contentAlignment = Alignment.Center,
             ) {
                 OwnTVIcon(
-                    OwnTVIcon.LIVE_TV,
+                    icon,
                     tint = if (isCurrent) colors.primary else colors.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )

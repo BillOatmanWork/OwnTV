@@ -287,6 +287,9 @@ fun OwnTVShell(
     val streamRegistry = koinInject<tv.own.owntv.core.live.OpenStreamRegistry>()
     var multiview by remember { mutableStateOf<tv.own.owntv.features.multiview.MultiviewState?>(null) }
     var multiviewPickFor by remember { mutableStateOf<Int?>(null) }
+    // The picker's History step: the tile is being filled from recently watched rather than from a
+    // category. Lives beside multiviewPickFor because it means nothing without a tile to fill.
+    var multiviewPickHistory by remember { mutableStateOf(false) }
     // Channels kept from the Live list (B5's second entry point). Pressing play on any channel is
     // what says "now": the grid opens with them already in it, and the selection is spent.
     val multiviewSelection by liveVm.multiviewSelection.collectAsStateWithLifecycle()
@@ -346,6 +349,15 @@ fun OwnTVShell(
     }
     val historyNowPlaying = overlayNowPlaying // one shared map; the history rail adds to it below
     LaunchedEffect(historyChannels) { liveVm.ensureNowPlaying(historyChannels) }
+    // The same list for Multiview's picker, so a tile filled from History sees exactly what the
+    // player's History overlay shows. Null while the query runs: the picker must be able to tell
+    // "not loaded yet" from "nothing watched yet", or it would give up before the rows arrived.
+    val multiviewHistory by produceState<List<ChannelEntity>?>(null, multiviewPickHistory) {
+        value = null
+        if (!multiviewPickHistory) return@produceState
+        value = runCatching { liveVm.historyChannels() }.getOrDefault(emptyList())
+    }
+    LaunchedEffect(multiviewHistory) { multiviewHistory?.let { liveVm.ensureNowPlaying(it) } }
     // Batch 7 — the single most-recent resumable item, surfaced as a shared top-bar "Continue" chip.
     val continueTarget by homeVm.continueTarget.collectAsStateWithLifecycle()
 
@@ -1201,6 +1213,7 @@ fun OwnTVShell(
                   grid.releaseAll()
                   multiview = null
                   multiviewPickFor = null
+                  multiviewPickHistory = false
                   liveVm.ensurePlaying(channel)
                   playerMode = PlayerMode.FULLSCREEN
               },
@@ -1215,6 +1228,7 @@ fun OwnTVShell(
                   grid.releaseAll()
                   multiview = null
                   multiviewPickFor = null
+                  multiviewPickHistory = false
                   exitPlayer()
               },
               modifier = Modifier.fillMaxSize(),
@@ -1231,8 +1245,36 @@ fun OwnTVShell(
                       currentCategoryId = grid.tiles.getOrNull(tile)?.channel?.categoryId,
                       onSelect = { catId -> liveVm.loadChannelsForCategory(catId) },
                       onDismiss = { liveVm.hideCategoryBrowser(); multiviewPickFor = null },
+                      // Recently watched, pinned above the categories: the channels most likely to be
+                      // wanted on a second tile are the ones the user was just watching, and they can
+                      // come from any playlist and any category.
+                      onSelectHistory = { multiviewPickHistory = true; liveVm.hideCategoryBrowser() },
                       modifier = Modifier.fillMaxSize(),
                   )
+              } else if (multiviewPickHistory && !multiviewHistory.isNullOrEmpty()) {
+                  tv.own.owntv.features.shell.components.ChannelListOverlay(
+                      channels = multiviewHistory.orEmpty(),
+                      currentId = grid.tiles.getOrNull(tile)?.channel?.id,
+                      nowPlaying = historyNowPlaying,
+                      title = stringResource(R.string.content_history),
+                      showNumbers = directTuneEnabled,
+                      providerNames = liveProviderNames,
+                      alignEnd = true,
+                      // Same shape as the category step: Back or Left goes up to the categories, so
+                      // History is one more branch of the picker rather than a separate one.
+                      onOpenCategories = { multiviewPickHistory = false; liveVm.showCategories() },
+                      onSelect = { grid.fill(tile, it); multiviewPickHistory = false; multiviewPickFor = null },
+                      onDismiss = { multiviewPickHistory = false; liveVm.showCategories() },
+                      modifier = Modifier.fillMaxSize(),
+                  )
+              } else if (multiviewPickHistory && multiviewHistory != null) {
+                  // Nothing watched yet. Like an empty category, never leave the picker with nothing
+                  // drawn, or Back falls through and closes the grid; go back to the categories.
+                  LaunchedEffect(Unit) { multiviewPickHistory = false; liveVm.showCategories() }
+              } else if (multiviewPickHistory) {
+                  // Still loading — a beat with nothing drawn, then the list or the fallback above.
+                  // Back is claimed even now, so it cannot fall through to the grid and close it.
+                  androidx.activity.compose.BackHandler { multiviewPickHistory = false; liveVm.showCategories() }
               } else if (zapChannels.isNotEmpty()) {
                   tv.own.owntv.features.shell.components.ChannelListOverlay(
                       channels = zapChannels,
