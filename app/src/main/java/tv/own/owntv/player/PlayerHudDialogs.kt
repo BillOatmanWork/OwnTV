@@ -249,6 +249,35 @@ internal fun ZoomDialog(current: ZoomMode, onSelect: (ZoomMode) -> Unit, onDismi
     }
 }
 
+/**
+ * What can be done about a companion that is already playing. The title names the channel, because
+ * the picture's name is on screen and the sound's is not; the rows are the three verbs, each absent
+ * when the shell has nothing to do for it.
+ */
+@Composable
+internal fun CompanionDialog(
+    listeningTo: String,
+    onChange: (() -> Unit)?,
+    onSwap: (() -> Unit)?,
+    onStop: (() -> Unit)?,
+    onDismiss: () -> Unit,
+) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { requestFocusRetrying(focus) }
+    BackHandler { onDismiss() }
+    DialogScaffold(title = stringResource(R.string.companion_listening, listeningTo), onDismiss = onDismiss) {
+        if (onChange != null) {
+            item { OptionRow(label = stringResource(R.string.multiview_tile_change_channel), selected = false, modifier = Modifier.focusRequester(focus), onClick = onChange) }
+        }
+        if (onSwap != null) {
+            item { OptionRow(label = stringResource(R.string.companion_swap), selected = false, onClick = onSwap) }
+        }
+        if (onStop != null) {
+            item { OptionRow(label = stringResource(R.string.companion_stop), selected = false, onClick = onStop) }
+        }
+    }
+}
+
 @Composable
 internal fun VolumeDialog(player: PlaybackEngine, onDismiss: () -> Unit) {
     val colors = OwnTVTheme.colors

@@ -69,6 +69,11 @@ internal fun TopBar(
     // The clock. Rendered between two equal-weight halves so it lands on the true centre of the screen
     // whatever the channel name and guide card happen to be doing on either side of it.
     centre: (@Composable () -> Unit)? = null,
+    // Companion audio: the channel whose sound is playing instead of this one's, and — when that
+    // sound is not actually there — the reason. Drawn under the channel name, where the eye goes to
+    // learn what is on, because "what am I hearing" is the same question with the picture muted.
+    listeningTo: String? = null,
+    companionNote: String? = null,
 ) {
     // Reactive meta so the title row updates instantly on a channel zap (the plain vars aren't observed).
     val meta by player.currentMeta.collectAsStateWithLifecycle()
@@ -133,6 +138,22 @@ internal fun TopBar(
                         Spacer(Modifier.width(10.dp))
                     }
                     Text(displayTitle, style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (listeningTo != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OwnTVIcon(OwnTVIcon.HEADPHONES, tint = OwnTVTheme.colors.primary, modifier = Modifier.size(14.dp))
+                        Text(
+                            stringResource(R.string.companion_listening, listeningTo),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = OwnTVTheme.colors.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    companionNote?.let {
+                        Text(it, style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.6f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             } else {
                 vodSubtitle?.let {
@@ -313,6 +334,7 @@ internal fun BottomBar(
     onInfo: (() -> Unit)? = null, infoOn: Boolean = false, onReport: (() -> Unit)? = null,
     favorite: Boolean = false, onToggleFavorite: (() -> Unit)? = null,
     onOpenDialog: (HudDialog) -> Unit, onPip: (() -> Unit)?, onAudioMode: (() -> Unit)?,
+    onListenTo: (() -> Unit)? = null, listening: Boolean = false,
     onMultiview: (() -> Unit)? = null, onRecordThis: (() -> Unit)? = null, recordingThis: Boolean = false,
     onBack: () -> Unit, modifier: Modifier = Modifier,
 ) {
@@ -435,8 +457,18 @@ internal fun BottomBar(
                         PlayerControl.MINI_PLAYER -> if (onPip != null) {
                             CtrlButton(OwnTVIcon.PIP, label = stringResource(R.string.player_tool_mini)) { onPip() }
                         }
-                        PlayerControl.AUDIO_ONLY -> if (onAudioMode != null) {
-                            CtrlButton(OwnTVIcon.HEADPHONES, label = stringResource(R.string.player_tool_audio_only)) { onAudioMode() }
+                        PlayerControl.AUDIO_ONLY -> {
+                            if (onAudioMode != null) {
+                                CtrlButton(OwnTVIcon.HEADPHONES, label = stringResource(R.string.player_tool_audio_only)) { onAudioMode() }
+                            }
+                            // Companion audio sits with its nearest relative: both are about hearing
+                            // something other than the picture. Tinted while a second channel plays,
+                            // when a press opens the change/swap/stop menu instead of the picker.
+                            if (onListenTo != null) {
+                                CtrlButton(OwnTVIcon.AUDIO, active = listening, label = stringResource(R.string.companion_listen)) {
+                                    if (listening) onOpenDialog(HudDialog.COMPANION) else onListenTo()
+                                }
+                            }
                         }
                         // Live only, and only once the user has switched Multiview on: four tiles
                         // from the channel already playing. Next to the mini-player button, which is

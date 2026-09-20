@@ -117,7 +117,7 @@ private const val PLAYER_SHORTCUT_LONG_PRESS_MS = 600L
 private const val TRACK_POLL_MS = 300L
 private const val TRACK_POLL_TRIES = 20
 
-internal enum class HudDialog { NONE, AUDIO, SUBS, SPEED, ZOOM, VOLUME, SUB_TIMING, JUMP_BACK }
+internal enum class HudDialog { NONE, AUDIO, SUBS, SPEED, ZOOM, VOLUME, SUB_TIMING, JUMP_BACK, COMPANION }
 
 /** What the top-left channel OSD shows for direct tune: the digits being typed, the channel a number
  *  resolved to, or a failure message. All three render as the same card as the channel OSD. */
@@ -137,6 +137,16 @@ fun PlayerHud(
     // Live only, and only when Multiview is switched on in Settings: turn this channel into tile 1 of
     // the grid. Null hides the button entirely — the feature is opt-in (D3's shape, applied to D5).
     onMultiview: (() -> Unit)? = null,
+    // Companion audio (live only): the sound of a second channel behind this picture. [onListenTo]
+    // opens the shell's channel picker; null hides the button. [listeningTo] names the channel while
+    // one plays, which turns the button into the menu (change / swap / stop) and draws the badge in
+    // the top bar; [companionNote] is the sentence for a companion that is silent — refused by the
+    // connection budget or failed by its engine — so the badge never claims a sound that is not there.
+    onListenTo: (() -> Unit)? = null,
+    listeningTo: String? = null,
+    companionNote: String? = null,
+    onSwapCompanion: (() -> Unit)? = null,
+    onStopListening: (() -> Unit)? = null,
     // Live only, and only once "Record what I'm watching" is switched on in Settings (D3): record the
     // channel already playing, over the connection already open. Null hides the button entirely —
     // the feature does not exist until the user has accepted the one-connection trade-off.
@@ -609,6 +619,7 @@ fun PlayerHud(
             TopBar(
                 player, isLive, listOfNotNull(engineChip) + streamChips.ifEmpty { listOfNotNull(videoRes) }, duration, onBack,
                 modifier = Modifier.align(Alignment.TopStart),
+                listeningTo = listeningTo, companionNote = companionNote,
                 trailing = if (error == null) liveEpgCard else null,
                 // Hidden behind an error overlay along with the rest of the chrome: a clock ticking
                 // over a failure message just draws the eye to the wrong thing.
@@ -659,6 +670,7 @@ fun PlayerHud(
                     },
                     favorite = favorite, onToggleFavorite = onToggleFavorite,
                     onOpenDialog = { dialog = it }, onPip = onPip, onAudioMode = onAudioMode,
+                    onListenTo = onListenTo, listening = listeningTo != null,
                     onMultiview = onMultiview, onRecordThis = onRecordThis, recordingThis = recordingThis, onBack = onBack,
                     modifier = Modifier.align(Alignment.BottomStart),
                 )
@@ -837,6 +849,13 @@ fun PlayerHud(
         HudDialog.SPEED -> SpeedDialog(current = speed, onSelect = { player.setSpeed(it); dialog = HudDialog.NONE }, onDismiss = { dialog = HudDialog.NONE })
         HudDialog.ZOOM -> ZoomDialog(current = zoomMode, onSelect = { player.setZoomModeByUser(it); dialog = HudDialog.NONE }, onDismiss = { dialog = HudDialog.NONE })
         HudDialog.VOLUME -> VolumeDialog(player, onDismiss = { dialog = HudDialog.NONE })
+        HudDialog.COMPANION -> CompanionDialog(
+            listeningTo = listeningTo.orEmpty(),
+            onChange = onListenTo?.let { open -> { dialog = HudDialog.NONE; open() } },
+            onSwap = onSwapCompanion?.let { swap -> { dialog = HudDialog.NONE; swap() } },
+            onStop = onStopListening?.let { stop -> { dialog = HudDialog.NONE; stop() } },
+            onDismiss = { dialog = HudDialog.NONE },
+        )
         // "Go back to…". The options are read here, as the list opens, so the clock times shown are
         // relative to the moment the user asked rather than to when the HUD was first composed.
         HudDialog.JUMP_BACK -> {

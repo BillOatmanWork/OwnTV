@@ -132,6 +132,10 @@ class LiveViewModel(
     private val epgRepository: tv.own.owntv.core.repository.EpgRepository,
     private val externalPlayerLauncher: tv.own.owntv.core.player.ExternalPlayerLauncher,
     private val recordings: tv.own.owntv.core.recording.RecordingManager,
+    /** Who holds a stream on which playlist — the companion claims a connection like a Multiview tile. */
+    private val streamRegistry: tv.own.owntv.core.live.OpenStreamRegistry,
+    /** Builds the companion's own engine, on first use only: most sessions never listen to a second channel. */
+    private val newCompanionEngine: () -> tv.own.owntv.player.LivePreviewEngine,
 ) : ViewModel() {
 
     // --- "Record what I'm watching" (Plan D, D3 mode b) -----------------------------------------
@@ -977,6 +981,131 @@ class LiveViewModel(
         )
     }
 
+    // --- Companion audio: a second live channel's sound behind the picture ---------------------------
+
+    /**
+     * The channel being listened to while another one is on screen, and how it is doing.
+     *
+     * [refusal] is set when the playlist had no connection to spare: the picture is not in
+     * [streamRegistry] (the full-screen player never claims), so the budget is asked with the picture
+     * counted by hand when it comes from the same playlist. [failed] is the engine's own verdict after
+     * it tried. Either way the channel stays named, so the HUD can say what was asked for and why it
+     * is silent, instead of quietly showing nothing.
+     */
+    data class CompanionAudio(
+        val channel: ChannelEntity,
+        val refusal: tv.own.owntv.core.live.StreamGrant.Refused? = null,
+        val failed: Boolean = false,
+    )
+
+    private val _companion = MutableStateFlow<CompanionAudio?>(null)
+    val companion: StateFlow<CompanionAudio?> = _companion.asStateFlow()
+
+    /** Built on first use and kept for the life of the view model; released in [onCleared]. */
+    private var companionEngine: tv.own.owntv.player.LivePreviewEngine? = null
+    private var companionClaim: tv.own.owntv.core.live.OpenStreamRegistry.Claim? = null
+    private var companionWatchJob: Job? = null
+
+    private fun companionEngine(): tv.own.owntv.player.LivePreviewEngine =
+        companionEngine ?: newCompanionEngine().also { engine ->
+            companionEngine = engine
+            // The engine's failure is the companion's failure. Its own reconnect ladder runs first; only
+            // a settled ERROR reaches here, and a later recovery clears it again.
+            companionWatchJob = viewModelScope.launch {
+                engine.state.collect { state ->
+                    val failed = state == tv.own.owntv.player.LivePreviewEngine.State.ERROR
+                    _companion.value?.let {
+                        if (it.failed != failed) {
+                            _companion.value = it.copy(failed = failed)
+                            applyCompanionMute() // a failed companion hands the sound back; a recovered one takes it again
+                        }
+                    }
+                }
+            }
+        }
+
+    /**
+     * Listen to [channel] behind whatever is on screen. The picture keeps playing and loses its sound;
+     * the companion plays sound only, so it costs a provider connection but no decoder.
+     *
+     * A second call replaces the companion, which is how "change the sound channel" works: release
+     * the old claim first, so swapping never counts as two.
+     */
+    fun listenTo(channel: ChannelEntity) {
+        releaseCompanionStream()
+        val source = sourceById[channel.sourceId]
+        var open = streamRegistry.openOn(channel.sourceId)
+        if (_previewChannel.value?.sourceId == channel.sourceId) open = open.copy(watching = open.watching + 1)
+        when (val grant = tv.own.owntv.core.live.connectionBudget(source, open, tv.own.owntv.core.live.StreamPurpose.WATCHING)) {
+            is tv.own.owntv.core.live.StreamGrant.Refused -> {
+                _companion.value = CompanionAudio(channel, refusal = grant)
+                applyCompanionMute()
+                return
+            }
+            tv.own.owntv.core.live.StreamGrant.Allowed -> Unit
+        }
+        companionClaim = streamRegistry.claim(channel.sourceId, tv.own.owntv.core.live.StreamPurpose.WATCHING)
+        _companion.value = CompanionAudio(channel)
+        val engine = companionEngine()
+        tuneTile(engine, channel, muted = false)
+        engine.enterAudioOnly()
+        engineLog("companion '${channel.name}'")
+        applyCompanionMute()
+    }
+
+    /** Give the picture its sound back and drop the second stream. Safe to call when nothing is playing. */
+    fun stopListening() {
+        if (_companion.value == null && companionClaim == null) return
+        releaseCompanionStream()
+        _companion.value = null
+        applyCompanionMute()
+    }
+
+    /**
+     * The channel being listened to becomes the picture, and the picture becomes the sound. The
+     * ordinary tune runs for the new picture (history, engine choice, everything), then the old
+     * picture is asked for as the companion — its connection was released a moment earlier, so on a
+     * playlist with exactly two connections the swap still fits.
+     */
+    fun swapCompanion() {
+        val sound = _companion.value?.channel ?: return
+        val picture = _previewChannel.value ?: return
+        releaseCompanionStream()
+        _companion.value = null
+        ensurePlaying(sound)
+        listenTo(picture)
+    }
+
+    private fun releaseCompanionStream() {
+        companionClaim?.let { streamRegistry.release(it) }
+        companionClaim = null
+        companionEngine?.let { engine ->
+            engine.setMuted(true)
+            engine.stop()
+        }
+    }
+
+    /**
+     * The picture is silent while a companion plays, and audible otherwise — on whichever engine is
+     * carrying it. Re-applied after every tune and engine change, because both engines un-mute
+     * themselves when they start a stream: `startOnExo` promotes with `setMuted(false)`, and mpv's
+     * `play` writes the mute property fresh each load.
+     */
+    private fun applyCompanionMute() {
+        val silent = pictureMuted()
+        player.setMuted(silent)
+        if (_liveOnExo.value) previewEngine.setMuted(silent)
+    }
+
+    /**
+     * What the picture's own sound should be right now: off while a companion actually plays. A
+     * companion that was refused or has failed is silent, and silencing the picture as well would
+     * leave the room with nothing — so the picture keeps its sound and the badge says why the other
+     * channel is not being heard. The promote and play paths ask this instead of assuming "on", so a
+     * zap never lets the picture's sound through for the beat before the collector in `init` catches up.
+     */
+    private fun pictureMuted(): Boolean = _companion.value?.let { it.refusal == null && !it.failed } == true
+
     /** Stalker preview: same "already-previewing → just re-mute" shortcut keyed by the cmd, else
      *  resolve the cmd to a real URL (create_link) and load it. Async because resolution is a network call. */
     private fun playPreviewStalker(channel: ChannelEntity, source: tv.own.owntv.core.database.entity.SourceEntity) {
@@ -1053,6 +1182,14 @@ class LiveViewModel(
     fun loadChannelsForCategory(categoryId: Long) =
         zapList.armForCategory(categoryId) { _showCategoryBrowser.value = false }
 
+    /**
+     * One category's channels and its name, for a picker that must not arm the zap list — companion
+     * audio's, drawn over a picture that is still being watched and zapped. [loadChannelsForCategory]
+     * is the same query with the side effect; this is the query alone.
+     */
+    suspend fun channelsForCategory(categoryId: Long): Pair<String?, List<ChannelEntity>> =
+        categoryDao.getById(categoryId)?.name to channelsInCategory(categoryId)
+
     /** One provider category, in its manual order — the in-player category browser's pick. */
     private suspend fun channelsInCategory(categoryId: Long): List<ChannelEntity> {
         val pid = currentProfileId() ?: return emptyList()
@@ -1107,6 +1244,19 @@ class LiveViewModel(
             }
         }
         viewModelScope.launch { player.archiveEnded.collect { continueAfterCatchup() } }
+        // Companion audio: every transition the picture engines go through re-asserts the mute. Cheap,
+        // and the only way to be sure — the engines' own un-mutes happen inside play paths this class
+        // does not all own. Lives in THIS init for the reason given above it: the collector starts
+        // inline, and _liveOnExo is only initialised a few lines up.
+        viewModelScope.launch {
+            combine(_previewChannel, _liveOnExo, previewEngine.state, player.isPlaying) { ch, _, _, _ -> ch }
+                .collect { picture ->
+                    val companion = _companion.value ?: return@collect
+                    // Zapping onto the channel already being listened to: the user is now watching it,
+                    // so the second stream is pointless. The picture takes its sound back.
+                    if (picture?.id == companion.channel.id) stopListening() else applyCompanionMute()
+                }
+        }
     }
 
     /** Called when anything OTHER than a promoted live channel takes over full-screen (a movie/episode,
@@ -1585,7 +1735,7 @@ class LiveViewModel(
         if (streamUrlResolver.needsResolve(source)) { startOnExoStalker(channel, source!!); return }
         val targetUrl = tuneUrl(channel, source)
         if (previewEngine.currentUrl == targetUrl) {
-            previewEngine.setMuted(false) // promote — instant if already PLAYING, otherwise keeps loading
+            previewEngine.setMuted(pictureMuted()) // promote — instant if already PLAYING, otherwise keeps loading
         } else {
             // In-player zap to a DIFFERENT channel (CH+/-, D-pad, channel-list overlay): if we're leaving a
             // UHD channel, fully release its 4K decoder before the reuse/rebuild (no-op for SD/HD). Matches
@@ -1594,7 +1744,7 @@ class LiveViewModel(
             stalkerPreviewCmd = null
             setStalkerReconnect(null) // non-Stalker: URLs are stable, replay on reconnect
             previewEngine.play(
-                targetUrl, muted = false,
+                targetUrl, muted = pictureMuted(),
                 meta = tv.own.owntv.player.MediaMeta(title = channel.name, subtitle = channelNumberLabel(channel), logoUrl = channel.displayLogoUrl, contentKey = mpvPinKey(channel)),
                 userAgent = sourceUaMap[channel.sourceId] ?: source?.userAgent,
                 prerollSecsOverride = prerollFor(channel.sourceId),
@@ -1610,7 +1760,7 @@ class LiveViewModel(
      *  else resolve the cmd (create_link) and load the fresh URL. */
     private fun startOnExoStalker(channel: ChannelEntity, source: tv.own.owntv.core.database.entity.SourceEntity) {
         if (stalkerPreviewCmd == channel.streamUrl) {
-            previewEngine.setMuted(false) // promote the already-loaded preview
+            previewEngine.setMuted(pictureMuted()) // promote the already-loaded preview
             setStalkerReconnect(channel.streamUrl) // C-3: re-resolve on reconnect if the URL expires
             watchExoOutcome(channel)
             return
@@ -2524,4 +2674,13 @@ class LiveViewModel(
         const val MAX_NOW_PLAYING = 2_000
 
     }
+
+    override fun onCleared() {
+        companionWatchJob?.cancel()
+        companionClaim?.let { streamRegistry.release(it) }
+        companionEngine?.release()
+        companionEngine = null
+        super.onCleared()
+    }
+
 }

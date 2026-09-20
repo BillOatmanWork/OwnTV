@@ -1,5 +1,6 @@
 package tv.own.owntv.di
 
+import org.koin.android.ext.koin.androidContext
 import org.koin.core.module.dsl.viewModel
 import org.koin.core.module.dsl.singleOf
 import org.koin.core.module.dsl.viewModelOf
@@ -61,9 +62,9 @@ val appModule = module {
     // Takes a Context first; Koin resolves it from androidContext().
     //
     // Spelled out rather than `viewModelOf(::LiveViewModel)`: that reflective helper is generated for
-    // up to 22 constructor parameters and this class now has 23. The failure is a "none of the
+    // up to 22 constructor parameters and this class now has 25. The failure is a "none of the
     // following candidates is applicable" at the call above, which says nothing about arity — hence
-    // this note. Every argument is resolved by type, so the order here does not matter.
+    // this note. Every argument but the last is resolved by type, so the order here does not matter.
     viewModel {
         LiveViewModel(
             get(),
@@ -89,6 +90,10 @@ val appModule = module {
             get(),
             get(),
             get(),
+            get(),
+            // Companion audio's engine, built the same way the Multiview pool builds a tile's, and only
+            // when the user first listens to a second channel.
+            { tv.own.owntv.player.LivePreviewEngine(androidContext(), get(), get(), get(), get(), get()) },
         )
     }
     viewModelOf(::MovieViewModel)

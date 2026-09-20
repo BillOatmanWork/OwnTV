@@ -92,7 +92,9 @@ import tv.own.owntv.features.shell.components.SolidAmbientBackdrop
 import tv.own.owntv.features.shell.components.TopBar
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import tv.own.owntv.core.live.displayText
 import tv.own.owntv.player.alignment
 import tv.own.owntv.ui.components.OwnTVIcon
 import tv.own.owntv.ui.components.LocalRemoteShortcuts
@@ -290,6 +292,31 @@ fun OwnTVShell(
     // The picker's History step: the tile is being filled from recently watched rather than from a
     // category. Lives beside multiviewPickFor because it means nothing without a tile to fill.
     var multiviewPickHistory by remember { mutableStateOf(false) }
+    // Companion audio's channel picker, over the full-screen player. The same three steps as
+    // Multiview's — categories with History pinned first, then a list — but it must not touch the
+    // zap list the way loadChannelsForCategory does: the picture is still playing, and CH± must keep
+    // zapping where the user left them. So the category's channels are fetched into this state instead.
+    var companionPick by remember { mutableStateOf<CompanionPick?>(null) }
+    val companion by liveVm.companion.collectAsStateWithLifecycle()
+    // The companion exists for a live picture and for nothing else. Whatever ends that picture — Back,
+    // a movie starting, a profile switch, Settings stopping playback — passes through playerMode or
+    // zapSource, so this one rule closes the second stream on every path rather than each path
+    // remembering to. Backgrounding is the exception: MainActivity frees the picture engines from
+    // onStop without touching the shell's state, so the same lifecycle event is watched here.
+    LaunchedEffect(playerMode, zapSource, companion != null) {
+        if (companion != null && (playerMode == PlayerMode.NONE || zapSource != MainSection.LIVE_TV)) {
+            liveVm.stopListening()
+            companionPick = null
+        }
+    }
+    val shellLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(shellLifecycle) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) { liveVm.stopListening(); companionPick = null }
+        }
+        shellLifecycle.lifecycle.addObserver(observer)
+        onDispose { shellLifecycle.lifecycle.removeObserver(observer) }
+    }
     // Channels kept from the Live list (B5's second entry point). Pressing play on any channel is
     // what says "now": the grid opens with them already in it, and the selection is spent.
     val multiviewSelection by liveVm.multiviewSelection.collectAsStateWithLifecycle()
@@ -352,9 +379,10 @@ fun OwnTVShell(
     // The same list for Multiview's picker, so a tile filled from History sees exactly what the
     // player's History overlay shows. Null while the query runs: the picker must be able to tell
     // "not loaded yet" from "nothing watched yet", or it would give up before the rows arrived.
-    val multiviewHistory by produceState<List<ChannelEntity>?>(null, multiviewPickHistory) {
+    val wantPickerHistory = multiviewPickHistory || companionPick == CompanionPick.History
+    val multiviewHistory by produceState<List<ChannelEntity>?>(null, wantPickerHistory) {
         value = null
-        if (!multiviewPickHistory) return@produceState
+        if (!wantPickerHistory) return@produceState
         value = runCatching { liveVm.historyChannels() }.getOrDefault(emptyList())
     }
     LaunchedEffect(multiviewHistory) { multiviewHistory?.let { liveVm.ensureNowPlaying(it) } }
@@ -474,6 +502,8 @@ fun OwnTVShell(
         showHistoryList = false
         liveVm.hideCategoryBrowser()
         liveVm.onFullscreenExited() // no longer full-screen on ExoPlayer → let the preview re-take the engine
+        liveVm.stopListening() // the companion belongs to the picture; nothing is left playing behind a closed player
+        companionPick = null
         player.stop()
         subtitleController.clear() // leaving the player drops the OpenSubtitles item context
         if (selectedSection != MainSection.LIVE_TV) liveVm.clearLiveOnExo()
@@ -490,6 +520,7 @@ fun OwnTVShell(
     val openMultiview = { first: tv.own.owntv.core.database.entity.ChannelEntity?,
                           extra: List<tv.own.owntv.core.database.entity.ChannelEntity> ->
         liveVm.previewEngine.stop()
+        liveVm.stopListening() // the grid has its own engines and its own claims; nothing rides along
         player.stop()
         val state = tv.own.owntv.features.multiview.MultiviewState(
             pool = enginePool,
@@ -532,6 +563,8 @@ fun OwnTVShell(
     // Switch the current stream to audio-only and surface the now-playing bar in the top bar. Stop the
     // video decoder FIRST (plan §5 ordering rule), then drop the video surface by leaving FULLSCREEN/MINI.
     val toAudioMode = {
+        // Audio mode is "hear this channel": a companion would leave it silent, which is not that.
+        liveVm.stopListening()
         (if (liveOnExo) liveVm.previewEngine else mpvEngine).enterAudioOnly()
         playerMode = PlayerMode.AUDIO
         restoreFocus = true
@@ -1394,7 +1427,17 @@ fun OwnTVShell(
                     onAudioMode = toAudioMode,
                     // The channel-list overlay draws ABOVE the HUD; while it's open the HUD goes inert so
                     // its hide/error focus grabs can't yank D-pad focus off the overlay.
-                    inert = showChannelList || showHistoryList || showCategoryBrowser || showSubtitleSearch || showLocalSubPicker,
+                    inert = showChannelList || showHistoryList || showCategoryBrowser || showSubtitleSearch || showLocalSubPicker || companionPick != null,
+                    // Companion audio: live channels only. The picker starts at the categories, History
+                    // pinned first, exactly as Multiview's does.
+                    onListenTo = if (isLiveChannel) { { companionPick = CompanionPick.Categories } } else null,
+                    listeningTo = companion?.channel?.name,
+                    companionNote = companion?.let { c ->
+                        c.refusal?.displayText(LocalContext.current.resources)
+                            ?: if (c.failed) stringResource(R.string.companion_failed) else null
+                    },
+                    onSwapCompanion = if (companion != null && isTunedLive) liveVm::swapCompanion else null,
+                    onStopListening = if (companion != null) liveVm::stopListening else null,
                     onChannelUp = zap?.let { z -> { z(-1) } },
                     onChannelDown = zap?.let { z -> { z(1) } },
                     onOpenChannelList = if (isTunedLive && liveCanZap) { { showChannelList = true } } else null,
@@ -1561,6 +1604,59 @@ fun OwnTVShell(
                         onDismiss = { showHistoryList = false },
                         modifier = Modifier.fillMaxSize(),
                     )
+                }
+                // Companion audio's picker. Same shape as Multiview's: categories (History pinned
+                // first) → a list; Back or outward from a list goes up to the categories, Back from
+                // the categories closes the picker, and the picture plays on underneath throughout.
+                when (val pick = companionPick) {
+                    null -> Unit
+                    CompanionPick.Categories -> tv.own.owntv.features.shell.components.CategoryBrowserOverlay(
+                        categories = browserCategories,
+                        currentCategoryId = companion?.channel?.categoryId ?: previewChannel?.categoryId,
+                        onSelect = { catId ->
+                            scope.launch {
+                                val (title, channels) = liveVm.channelsForCategory(catId)
+                                companionPick = CompanionPick.Channels(title, channels)
+                            }
+                        },
+                        onDismiss = { companionPick = null },
+                        onSelectHistory = { companionPick = CompanionPick.History },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    CompanionPick.History -> when {
+                        !multiviewHistory.isNullOrEmpty() -> tv.own.owntv.features.shell.components.ChannelListOverlay(
+                            channels = multiviewHistory.orEmpty(),
+                            currentId = companion?.channel?.id,
+                            nowPlaying = historyNowPlaying,
+                            title = stringResource(R.string.content_history),
+                            showNumbers = directTuneEnabled,
+                            providerNames = liveProviderNames,
+                            alignEnd = true,
+                            onOpenCategories = { companionPick = CompanionPick.Categories },
+                            onSelect = { liveVm.listenTo(it); companionPick = null },
+                            onDismiss = { companionPick = CompanionPick.Categories },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                        // Nothing watched yet: back to the categories, never a blank picker.
+                        multiviewHistory != null -> LaunchedEffect(Unit) { companionPick = CompanionPick.Categories }
+                        else -> BackHandler { companionPick = CompanionPick.Categories }
+                    }
+                    is CompanionPick.Channels -> if (pick.channels.isNotEmpty()) {
+                        tv.own.owntv.features.shell.components.ChannelListOverlay(
+                            channels = pick.channels,
+                            currentId = companion?.channel?.id,
+                            title = pick.title,
+                            showNumbers = directTuneEnabled,
+                            providerNames = liveProviderNames,
+                            alignEnd = true,
+                            onOpenCategories = { companionPick = CompanionPick.Categories },
+                            onSelect = { liveVm.listenTo(it); companionPick = null },
+                            onDismiss = { companionPick = CompanionPick.Categories },
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    } else {
+                        LaunchedEffect(Unit) { companionPick = CompanionPick.Categories }
+                    }
                 }
             } else {
                 MiniPlayer(
@@ -1782,4 +1878,11 @@ private fun placeholderCount(section: MainSection): String = when (section) {
     MainSection.MOVIES -> stringResource(R.string.content_zero_movies)
     MainSection.SERIES -> stringResource(R.string.content_zero_series)
     MainSection.DOWNLOADS -> stringResource(R.string.content_zero_downloads)
+}
+
+/** Where companion audio's channel picker is: the categories, the History list, or one category's channels. */
+private sealed interface CompanionPick {
+    data object Categories : CompanionPick
+    data object History : CompanionPick
+    data class Channels(val title: String?, val channels: List<ChannelEntity>) : CompanionPick
 }
